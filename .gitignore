@@ -1,1 +1,6 @@
 data.txt
+__pycache__/
+*.pyc
+todoist_cache.json
+*.cache
+cache/
