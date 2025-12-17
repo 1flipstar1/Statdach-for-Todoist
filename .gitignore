@@ -1,4 +1,4 @@
-data.txt
+data.py
 __pycache__/
 *.pyc
 todoist_cache.json

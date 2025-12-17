@@ -9,11 +9,10 @@ from matplotlib import font_manager
 import matplotlib as mpl
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtGui import QFontDatabase
+from data import PROJECT_ID, API_TOKEN
 
 
 # ============ НАСТРОЙКИ ============
-PROJECT_ID = "your_id"
-API_TOKEN = "your_api"
 UPDATE_INTERVAL = 15000
 
 CUSTOM_FONT_PATH = "fonts/MyFont.ttf"
