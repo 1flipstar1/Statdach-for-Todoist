@@ -21,7 +21,10 @@ DEFAULT_FONT_FAMILY = "Segoe UI"
 FONT_SIZE = 10
 
 MONTHLY_GOAL = 100
+WEEKLY_GOAL = 7   # Цель на неделю
+MONTHLY_STATS_GOAL = 30  # Цель на месяц для статистики
 CACHE_FILE = "todoist_cache.json"
+OLD_TASK_DAYS = 30  # Количество дней для определения "заждавшихся" задач
 # ===================================
 
 
@@ -710,6 +713,120 @@ class ProgressWidget(QtWidgets.QFrame):
                 progress_bar.setVisible(False)
 
 
+# Новый класс виджета статистики
+class StatsWidget(QtWidgets.QFrame):
+    """Виджет статистики с крупными цифрами"""
+    def __init__(self, title, icon, goal, font_family=DEFAULT_FONT_FAMILY):
+        super().__init__()
+        self.font_family = font_family
+        self.title_text = title
+        self.icon = icon
+        self.goal = goal
+        self.setup_ui()
+    
+    def setup_ui(self):
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #f8f9fa;
+                border-radius: 10px;
+                padding: 15px;
+            }
+        """)
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Заголовок
+        title_label = QtWidgets.QLabel(f'{self.icon} {self.title_text}')
+        title_label.setFont(QtGui.QFont(self.font_family, 11, QtGui.QFont.Weight.Bold))
+        title_label.setStyleSheet("color: #6c757d;")
+        layout.addWidget(title_label)
+        
+        # Основная цифра
+        self.count_label = QtWidgets.QLabel('0')
+        self.count_label.setFont(QtGui.QFont(self.font_family, 42, QtGui.QFont.Weight.Bold))
+        self.count_label.setStyleSheet("color: #2c3e50;")
+        self.count_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.count_label)
+        
+        # Прогресс к цели
+        self.progress_label = QtWidgets.QLabel(f'Цель: {self.goal}')
+        self.progress_label.setFont(QtGui.QFont(self.font_family, 10))
+        self.progress_label.setStyleSheet("color: #6c757d;")
+        self.progress_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.progress_label)
+        
+        # Прогресс-бар
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setMaximum(self.goal)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                border-radius: 4px;
+                background-color: #e9ecef;
+            }
+            QProgressBar::chunk {
+                background-color: #4A90E2;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+        
+        layout.addStretch()
+    
+    def update_data(self, count):
+        """Обновить данные статистики"""
+        self.count_label.setText(str(count))
+        self.progress_bar.setValue(min(count, self.goal))
+        
+        # Изменяем цвет в зависимости от достижения цели
+        if count >= self.goal:
+            self.count_label.setStyleSheet("color: #50C878;")  # Зеленый
+            self.progress_label.setText(f'🎉 Цель достигнута!')
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    border-radius: 4px;
+                    background-color: #e9ecef;
+                }
+                QProgressBar::chunk {
+                    background-color: #50C878;
+                    border-radius: 4px;
+                }
+            """)
+        elif count >= self.goal * 0.7:
+            self.count_label.setStyleSheet("color: #FFB347;")  # Оранжевый
+            self.progress_label.setText(f'Цель: {self.goal} (осталось {self.goal - count})')
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    border-radius: 4px;
+                    background-color: #e9ecef;
+                }
+                QProgressBar::chunk {
+                    background-color: #FFB347;
+                    border-radius: 4px;
+                }
+            """)
+        else:
+            self.count_label.setStyleSheet("color: #2c3e50;")
+            self.progress_label.setText(f'Цель: {self.goal} (осталось {self.goal - count})')
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    border-radius: 4px;
+                    background-color: #e9ecef;
+                }
+                QProgressBar::chunk {
+                    background-color: #4A90E2;
+                    border-radius: 4px;
+                }
+            """)
+
+
 class SectionListWidget(QtWidgets.QFrame):
     """Виджет со списком разделов (раскрывающийся)"""
     def __init__(self, title, font_family=DEFAULT_FONT_FAMILY):
@@ -958,8 +1075,9 @@ class ProjectPage(QtWidgets.QWidget):
             print(traceback.format_exc())
 
 
+# Обновленный класс WeeklyPage
 class WeeklyPage(QtWidgets.QWidget):
-    """Страница с недельной статистикой и тепловыми картами"""
+    """Страница с недельной статистикой и календарем месяца"""
     def __init__(self, api, font_family):
         super().__init__()
         self.api = api
@@ -968,28 +1086,21 @@ class WeeklyPage(QtWidgets.QWidget):
         self.setup_ui()
     
     def setup_ui(self):
-        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout = QtWidgets.QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(20)
-        
-        # Верхняя часть - две колонки
-        top_widget = QtWidgets.QWidget()
-        top_layout = QtWidgets.QHBoxLayout(top_widget)
-        top_layout.setSpacing(20)
         
         # Левая колонка - столбчатый график
         left_widget = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left_widget)
+        left_layout.setSpacing(10)
         
-        self.canvas = MplCanvas(self, width=7, height=5, dpi=100, font_family=self.font_family)
-        left_layout.addWidget(self.canvas)
+        title_label = QtWidgets.QLabel('📅 Статистика по дням недели')
+        title_label.setFont(QtGui.QFont(self.font_family, 18, QtGui.QFont.Weight.Bold))
+        title_label.setStyleSheet("color: #2c3e50; padding: 10px;")
+        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         
-        # Правая колонка - календарь месяца
-        self.month_calendar = MonthCalendarWidget(self.font_family)
-        
-        top_layout.addWidget(left_widget, stretch=3)
-        top_layout.addWidget(self.month_calendar, stretch=2)
-        
+        self.canvas = MplCanvas(self, width=8, height=7, dpi=100, font_family=self.font_family)
         
         # Время обновления
         self.time_label = QtWidgets.QLabel('Загрузка данных...')
@@ -997,8 +1108,36 @@ class WeeklyPage(QtWidgets.QWidget):
         self.time_label.setStyleSheet("color: #6c757d; padding: 5px;")
         self.time_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         
-        main_layout.addWidget(top_widget, stretch=2)
-        main_layout.addWidget(self.time_label)
+        left_layout.addWidget(title_label)
+        left_layout.addWidget(self.canvas, stretch=1)
+        left_layout.addWidget(self.time_label)
+        
+        # Правая колонка
+        right_widget = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_widget)
+        right_layout.setSpacing(15)
+        
+        # Календарь месяца
+        self.month_calendar = MonthCalendarWidget(self.font_family)
+        right_layout.addWidget(self.month_calendar)
+        
+        # Два виджета статистики в одну строку
+        stats_container = QtWidgets.QWidget()
+        stats_layout = QtWidgets.QHBoxLayout(stats_container)
+        stats_layout.setSpacing(15)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.weekly_stats = StatsWidget('Неделя', '📊', WEEKLY_GOAL, self.font_family)
+        self.monthly_stats = StatsWidget('Месяц', '📈', MONTHLY_STATS_GOAL, self.font_family)
+        
+        stats_layout.addWidget(self.weekly_stats)
+        stats_layout.addWidget(self.monthly_stats)
+        
+        right_layout.addWidget(stats_container)
+        right_layout.addStretch()
+        
+        main_layout.addWidget(left_widget, stretch=3)
+        main_layout.addWidget(right_widget, stretch=2)
     
     def update_from_data(self, data):
         """Обновить интерфейс из данных"""
@@ -1017,19 +1156,35 @@ class WeeklyPage(QtWidgets.QWidget):
             }
             weekday_map = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
             
+            weekly_count = 0
+            monthly_count = 0
+            
+            # Определяем начало месяца
+            start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            
             for task in all_completed:
                 completed_at = task.get('completed_at')
                 if completed_at:
                     task_date = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+                    
+                    # Подсчет для недели
                     if task_date >= start_of_week:
                         weekday = weekday_map[task_date.weekday()]
                         weekday_counts[weekday] += 1
+                        weekly_count += 1
+                    
+                    # Подсчет для месяца
+                    if task_date >= start_of_month:
+                        monthly_count += 1
             
             self.canvas.create_bar_chart(weekday_counts)
             
             # Обновляем календарь месяца
             self.month_calendar.update_data(all_completed)
-        
+            
+            # Обновляем виджеты статистики
+            self.weekly_stats.update_data(weekly_count)
+            self.monthly_stats.update_data(monthly_count)
             
             timestamp = data.get('timestamp', '')
             if timestamp:
@@ -1039,11 +1194,326 @@ class WeeklyPage(QtWidgets.QWidget):
                 current_time = QtCore.QDateTime.currentDateTime().toString('hh:mm:ss')
                 self.time_label.setText(f'Обновлено: {current_time}')
             
-            total = sum(weekday_counts.values())
-            print(f"✅ Недельная статистика: {total} задач")
+            print(f"✅ Недельная статистика: {weekly_count} задач | Месячная: {monthly_count} задач")
             
         except Exception as e:
             print(f"❌ Ошибка: {e}")
+            import traceback
+            print(traceback.format_exc())
+
+class TasksListWidget(QtWidgets.QFrame):
+    """Виджет со списком задач"""
+    def __init__(self, title, icon, font_family=DEFAULT_FONT_FAMILY):
+        super().__init__()
+        self.font_family = font_family
+        self.title_text = title
+        self.icon = icon
+        self.tasks = []
+        self.is_expanded = False
+        self.setup_ui()
+    
+    def setup_ui(self):
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #f8f9fa;
+                border-radius: 10px;
+                padding: 15px;
+            }
+        """)
+        
+        self.main_layout = QtWidgets.QVBoxLayout(self)
+        self.main_layout.setSpacing(10)
+        self.main_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Заголовок с количеством - фиксированная высота
+        header_widget = QtWidgets.QWidget()
+        header_widget.setFixedHeight(40)
+        header_layout = QtWidgets.QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.title_label = QtWidgets.QLabel(f'{self.icon} {self.title_text}')
+        self.title_label.setFont(QtGui.QFont(self.font_family, 13, QtGui.QFont.Weight.Bold))
+        self.title_label.setStyleSheet("color: #2c3e50; padding: 5px;")
+        header_layout.addWidget(self.title_label)
+        
+        self.count_label = QtWidgets.QLabel('0')
+        self.count_label.setFont(QtGui.QFont(self.font_family, 11, QtGui.QFont.Weight.Bold))
+        self.count_label.setStyleSheet("""
+            color: #ffffff;
+            background-color: #4A90E2;
+            border-radius: 10px;
+            padding: 2px 8px;
+        """)
+        header_layout.addWidget(self.count_label)
+        header_layout.addStretch()
+        
+        self.main_layout.addWidget(header_widget)
+        
+        # Scroll area для задач
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #f8f9fa;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #e9ecef;
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #6c757d;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #495057;
+            }
+        """)
+        
+        # Контейнер для задач
+        self.items_container = QtWidgets.QWidget()
+        self.items_container.setStyleSheet("background-color: #f8f9fa;")
+        self.items_layout = QtWidgets.QVBoxLayout(self.items_container)
+        self.items_layout.setContentsMargins(0, 0, 0, 0)
+        self.items_layout.setSpacing(5)
+        self.items_layout.addStretch()  # Растяжка в конце
+        
+        scroll.setWidget(self.items_container)
+        self.main_layout.addWidget(scroll, stretch=1)
+        
+        # Кнопка "Показать все" - фиксированная высота
+        self.expand_btn = QtWidgets.QPushButton('▼ Показать все')
+        self.expand_btn.setFixedHeight(35)
+        self.expand_btn.setFont(QtGui.QFont(self.font_family, 9))
+        self.expand_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ffffff;
+                color: #495057;
+                border: 1px solid #dee2e6;
+                border-radius: 5px;
+                padding: 8px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+            QPushButton:pressed {
+                background-color: #dee2e6;
+            }
+        """)
+        self.expand_btn.clicked.connect(self.toggle_expand)
+        self.expand_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.expand_btn.setVisible(False)
+        
+        self.main_layout.addWidget(self.expand_btn)
+
+    
+    def toggle_expand(self):
+        self.is_expanded = not self.is_expanded
+        self.render_items()
+        
+        if self.is_expanded:
+            self.expand_btn.setText('▲ Скрыть')
+        else:
+            self.expand_btn.setText('▼ Показать все')
+    
+    def update_data(self, tasks):
+        """Обновить список задач"""
+        self.tasks = tasks
+        self.count_label.setText(str(len(tasks)))
+        self.is_expanded = False
+        self.render_items()
+    
+    def render_items(self):
+        """Отрисовать элементы списка"""
+        # Очищаем старые виджеты (кроме stretch в конце)
+        while self.items_layout.count() > 1:
+            child = self.items_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        if not self.tasks:
+            empty_label = QtWidgets.QLabel("✅ Нет задач")
+            empty_label.setFont(QtGui.QFont(self.font_family, 10))
+            empty_label.setStyleSheet("color: #6c757d; padding: 10px;")
+            empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.items_layout.insertWidget(0, empty_label)
+            self.expand_btn.setVisible(False)
+        else:
+            items_to_show = self.tasks if self.is_expanded else self.tasks[:5]
+            
+            for i, task in enumerate(items_to_show):
+                # Контейнер для задачи
+                task_container = QtWidgets.QWidget()
+                task_layout = QtWidgets.QVBoxLayout(task_container)
+                task_layout.setContentsMargins(0, 0, 0, 0)
+                task_layout.setSpacing(3)
+                
+                # Название задачи
+                task_name = task.get('content', 'Без названия')
+                
+                # Приоритет (если есть)
+                priority = task.get('priority', 1)
+                priority_emoji = ''
+                if priority == 4:
+                    priority_emoji = '🔴 '
+                elif priority == 3:
+                    priority_emoji = '🟠 '
+                elif priority == 2:
+                    priority_emoji = '🔵 '
+                
+                task_label = QtWidgets.QLabel(f"{priority_emoji}• {task_name}")
+                task_label.setFont(QtGui.QFont(self.font_family, 10))
+                task_label.setStyleSheet("""
+                    color: #2c3e50;
+                    padding: 8px;
+                    background-color: #ffffff;
+                    border-radius: 5px;
+                """)
+                task_label.setWordWrap(True)
+                task_layout.addWidget(task_label)
+                
+                # Дата создания
+                created_at = task.get('created_at', '')
+                if created_at:
+                    created_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    days_old = (datetime.now(timezone.utc) - created_date).days
+                    
+                    date_text = f"Создана {days_old} дн. назад ({created_date.strftime('%d.%m.%Y')})"
+                    
+                    date_label = QtWidgets.QLabel(date_text)
+                    date_label.setFont(QtGui.QFont(self.font_family, 8))
+                    date_label.setStyleSheet("color: #6c757d; padding-left: 20px;")
+                    task_layout.addWidget(date_label)
+                
+                self.items_layout.insertWidget(i, task_container)
+            
+            self.expand_btn.setVisible(len(self.tasks) > 5)
+
+
+class PlanningPage(QtWidgets.QWidget):
+    """Страница планирования и управления задачами"""
+    def __init__(self, api, project_id, font_family):
+        super().__init__()
+        self.api = api
+        self.project_id = project_id
+        self.font_family = font_family
+        self.current_data = None
+        self.setup_ui()
+    
+    def setup_ui(self):
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Заголовок вверху - фиксированная высота
+        header_container = QtWidgets.QWidget()
+        header_container.setFixedHeight(60)
+        header_container.setStyleSheet("background-color: transparent;")
+        header_layout = QtWidgets.QHBoxLayout(header_container)
+        header_layout.setContentsMargins(0, 10, 0, 10)
+        
+        header_layout.addStretch()
+        
+        title_label = QtWidgets.QLabel('📋 Планирование задач')
+        title_label.setFont(QtGui.QFont(self.font_family, 20, QtGui.QFont.Weight.Bold))
+        title_label.setStyleSheet("color: #2c3e50;")
+        header_layout.addWidget(title_label)
+        
+        header_layout.addStretch()
+        
+        # Время обновления справа
+        self.time_label = QtWidgets.QLabel('Загрузка данных...')
+        self.time_label.setFont(QtGui.QFont(self.font_family, 9))
+        self.time_label.setStyleSheet("color: #6c757d;")
+        header_layout.addWidget(self.time_label)
+        
+        main_layout.addWidget(header_container)
+        
+        # Два виджета на всю оставшуюся область
+        content_layout = QtWidgets.QHBoxLayout()
+        content_layout.setSpacing(20)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Левый виджет - залежавшиеся задачи (на всю высоту)
+        self.old_tasks_widget = TasksListWidget('Заждавшиеся задачи', '⏰', self.font_family)
+        content_layout.addWidget(self.old_tasks_widget, stretch=1)
+        
+        # Правый виджет - I квадрант (на всю высоту)
+        self.quadrant1_widget = TasksListWidget('I квадрант', '🔥', self.font_family)
+        content_layout.addWidget(self.quadrant1_widget, stretch=1)
+        
+        main_layout.addLayout(content_layout, stretch=1)
+    
+    def update_from_data(self, data):
+        """Обновить интерфейс из данных"""
+        try:
+            self.current_data = data
+            
+            sections_dict = data.get('sections', {})
+            active_tasks = data.get('active_tasks', [])
+            
+            # Находим старые задачи (созданы более OLD_TASK_DAYS дней назад)
+            now = datetime.now(timezone.utc)
+            old_threshold = now - timedelta(days=OLD_TASK_DAYS)
+            
+            old_tasks = []
+            for task in active_tasks:
+                created_at = task.get('created_at', '')
+                if created_at:
+                    created_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    if created_date < old_threshold:
+                        old_tasks.append(task)
+            
+            # Если нет задач старше 30 дней, берем 3 самые старые
+            if not old_tasks and active_tasks:
+                # Сортируем все активные задачи по дате создания
+                tasks_with_dates = []
+                for task in active_tasks:
+                    created_at = task.get('created_at', '')
+                    if created_at:
+                        tasks_with_dates.append(task)
+                
+                tasks_with_dates.sort(key=lambda x: x.get('created_at', ''))
+                old_tasks = tasks_with_dates[:3]  # Берем 3 самые старые
+            else:
+                # Сортируем по дате создания (самые старые первыми)
+                old_tasks.sort(key=lambda x: x.get('created_at', ''))
+            
+            # Находим раздел "I квадрант" и задачи из него
+            quadrant1_section_id = None
+            for section_id, section_name in sections_dict.items():
+                if 'I квадрант' in section_name or 'I' == section_name.strip():
+                    quadrant1_section_id = section_id
+                    break
+            
+            quadrant1_tasks = []
+            if quadrant1_section_id:
+                quadrant1_tasks = [task for task in active_tasks 
+                                  if task.get('section_id') == quadrant1_section_id]
+                # Сортируем по приоритету (высокий приоритет первым)
+                quadrant1_tasks.sort(key=lambda x: x.get('priority', 1), reverse=True)
+            
+            # Обновляем виджеты
+            self.old_tasks_widget.update_data(old_tasks)
+            self.quadrant1_widget.update_data(quadrant1_tasks)
+            
+            # Обновляем время
+            timestamp = data.get('timestamp', '')
+            if timestamp:
+                dt = datetime.fromisoformat(timestamp)
+                self.time_label.setText(f'Обновлено: {dt.strftime("%H:%M:%S")}')
+            else:
+                current_time = QtCore.QDateTime.currentDateTime().toString('hh:mm:ss')
+                self.time_label.setText(f'Обновлено: {current_time}')
+            
+            print(f"✅ Планирование: {len(old_tasks)} старых задач, {len(quadrant1_tasks)} в I квадранте")
+            
+        except Exception as e:
+            print(f"❌ Ошибка обновления планирования: {e}")
             import traceback
             print(traceback.format_exc())
 
@@ -1081,11 +1551,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # Кнопки боковой панели
         self.btn_project = SidebarButton('📊', 'Аналитика проекта')
         self.btn_weekly = SidebarButton('📅', 'Календарь активности')
+        self.btn_planning = SidebarButton('📋', 'Планирование задач')
         
         self.btn_project.setChecked(True)
         
         sidebar_layout.addWidget(self.btn_project)
         sidebar_layout.addWidget(self.btn_weekly)
+        sidebar_layout.addWidget(self.btn_planning)
         sidebar_layout.addStretch()
         
         # Кнопка обновления внизу
@@ -1124,15 +1596,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # Создаем страницы
         self.project_page = ProjectPage(self.api, self.project_id, self.font_family)
         self.weekly_page = WeeklyPage(self.api, self.font_family)
+        self.planning_page = PlanningPage(self.api, self.project_id, self.font_family)
         
         self.stacked_widget.addWidget(self.project_page)
         self.stacked_widget.addWidget(self.weekly_page)
+        self.stacked_widget.addWidget(self.planning_page)
         
         pages_layout.addWidget(self.stacked_widget)
         
         # Подключаем кнопки к переключению страниц
         self.btn_project.clicked.connect(lambda: self.switch_page(0))
         self.btn_weekly.clicked.connect(lambda: self.switch_page(1))
+        self.btn_planning.clicked.connect(lambda: self.switch_page(2))
         
         # Добавляем в главный layout
         main_layout.addWidget(sidebar)
@@ -1159,6 +1634,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if cached_data:
             self.project_page.update_from_data(cached_data)
             self.weekly_page.update_from_data(cached_data)
+            self.planning_page.update_from_data(cached_data)
             print("✅ Данные из кэша отображены")
     
     def start_data_loading(self):
@@ -1180,6 +1656,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Обработать загруженные данные"""
         self.project_page.update_from_data(data)
         self.weekly_page.update_from_data(data)
+        self.planning_page.update_from_data(data)
     
     def on_error(self, error_msg):
         """Обработать ошибку загрузки"""
@@ -1196,6 +1673,158 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.btn_project.setChecked(index == 0)
         self.btn_weekly.setChecked(index == 1)
+        self.btn_planning.setChecked(index == 2)
+
+
+
+# class MainWindow(QtWidgets.QMainWindow):
+#     def __init__(self, font_family=DEFAULT_FONT_FAMILY):
+#         super().__init__()
+#         self.font_family = font_family
+#         self.setWindowTitle('Todoist Analytics Dashboard')
+#         self.setGeometry(100, 100, 1400, 800)
+        
+#         app_font = QtGui.QFont(self.font_family, FONT_SIZE)
+#         self.setFont(app_font)
+        
+#         self.api = TodoistAPI(API_TOKEN)
+#         self.project_id = PROJECT_ID
+#         self.loader_thread = None
+        
+#         central_widget = QtWidgets.QWidget()
+#         self.setCentralWidget(central_widget)
+        
+#         # Главный layout
+#         main_layout = QtWidgets.QHBoxLayout(central_widget)
+#         main_layout.setContentsMargins(0, 0, 0, 0)
+#         main_layout.setSpacing(0)
+        
+#         # Боковая панель
+#         sidebar = QtWidgets.QWidget()
+#         sidebar.setFixedWidth(80)
+#         sidebar.setStyleSheet("background-color: #2c3e50;")
+#         sidebar_layout = QtWidgets.QVBoxLayout(sidebar)
+#         sidebar_layout.setContentsMargins(10, 20, 10, 20)
+#         sidebar_layout.setSpacing(15)
+        
+#         # Кнопки боковой панели
+#         self.btn_project = SidebarButton('📊', 'Аналитика проекта')
+#         self.btn_weekly = SidebarButton('📅', 'Календарь активности')
+        
+#         self.btn_project.setChecked(True)
+        
+#         sidebar_layout.addWidget(self.btn_project)
+#         sidebar_layout.addWidget(self.btn_weekly)
+#         sidebar_layout.addStretch()
+        
+#         # Кнопка обновления внизу
+#         self.refresh_btn = QtWidgets.QPushButton('🔄')
+#         self.refresh_btn.setFixedSize(60, 60)
+#         self.refresh_btn.setFont(QtGui.QFont(self.font_family, 20))
+#         self.refresh_btn.setStyleSheet("""
+#             QPushButton {
+#                 background-color: #4A90E2;
+#                 color: white;
+#                 border: none;
+#                 border-radius: 10px;
+#             }
+#             QPushButton:hover {
+#                 background-color: #357ABD;
+#             }
+#             QPushButton:pressed {
+#                 background-color: #2868A8;
+#             }
+#             QPushButton:disabled {
+#                 background-color: #6c757d;
+#             }
+#         """)
+#         self.refresh_btn.clicked.connect(self.start_data_loading)
+#         self.refresh_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+#         sidebar_layout.addWidget(self.refresh_btn)
+        
+#         # Контейнер для страниц
+#         pages_container = QtWidgets.QWidget()
+#         pages_layout = QtWidgets.QVBoxLayout(pages_container)
+#         pages_layout.setContentsMargins(20, 20, 20, 20)
+        
+#         # QStackedWidget для переключения страниц
+#         self.stacked_widget = QtWidgets.QStackedWidget()
+        
+#         # Создаем страницы
+#         self.project_page = ProjectPage(self.api, self.project_id, self.font_family)
+#         self.weekly_page = WeeklyPage(self.api, self.font_family)
+        
+#         self.stacked_widget.addWidget(self.project_page)
+#         self.stacked_widget.addWidget(self.weekly_page)
+        
+#         pages_layout.addWidget(self.stacked_widget)
+        
+#         # Подключаем кнопки к переключению страниц
+#         self.btn_project.clicked.connect(lambda: self.switch_page(0))
+#         self.btn_weekly.clicked.connect(lambda: self.switch_page(1))
+        
+#         # Добавляем в главный layout
+#         main_layout.addWidget(sidebar)
+#         main_layout.addWidget(pages_container, stretch=1)
+        
+#         self.setStyleSheet("""
+#             QMainWindow {
+#                 background-color: #ffffff;
+#             }
+#         """)
+        
+#         # Таймер автообновления
+#         self.timer = QtCore.QTimer(self)
+#         self.timer.timeout.connect(self.start_data_loading)
+#         self.timer.start(UPDATE_INTERVAL)
+        
+#         # Сначала загружаем кэш, потом запускаем обновление
+#         self.load_cached_data()
+#         QtCore.QTimer.singleShot(100, self.start_data_loading)
+    
+#     def load_cached_data(self):
+#         """Загрузить данные из кэша"""
+#         cached_data = DataCache.load()
+#         if cached_data:
+#             self.project_page.update_from_data(cached_data)
+#             self.weekly_page.update_from_data(cached_data)
+#             print("✅ Данные из кэша отображены")
+    
+#     def start_data_loading(self):
+#         """Запустить загрузку данных в фоновом потоке"""
+#         if self.loader_thread and self.loader_thread.isRunning():
+#             print("⚠️ Загрузка уже выполняется")
+#             return
+        
+#         self.refresh_btn.setEnabled(False)
+#         self.refresh_btn.setText('⏳')
+        
+#         self.loader_thread = DataLoaderThread(self.api, self.project_id)
+#         self.loader_thread.data_loaded.connect(self.on_data_loaded)
+#         self.loader_thread.error_occurred.connect(self.on_error)
+#         self.loader_thread.finished.connect(self.on_loading_finished)
+#         self.loader_thread.start()
+    
+#     def on_data_loaded(self, data):
+#         """Обработать загруженные данные"""
+#         self.project_page.update_from_data(data)
+#         self.weekly_page.update_from_data(data)
+    
+#     def on_error(self, error_msg):
+#         """Обработать ошибку загрузки"""
+#         print(f"❌ {error_msg}")
+    
+#     def on_loading_finished(self):
+#         """Завершение загрузки"""
+#         self.refresh_btn.setEnabled(True)
+#         self.refresh_btn.setText('🔄')
+    
+#     def switch_page(self, index):
+#         """Переключение между страницами"""
+#         self.stacked_widget.setCurrentIndex(index)
+        
+#         self.btn_project.setChecked(index == 0)
+#         self.btn_weekly.setChecked(index == 1)
 
 
 if __name__ == '__main__':
