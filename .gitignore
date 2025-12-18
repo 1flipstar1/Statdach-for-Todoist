@@ -4,3 +4,4 @@ __pycache__/
 todoist_cache.json
 *.cache
 cache/
+scheduled_events.json

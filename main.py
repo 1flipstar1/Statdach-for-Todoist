@@ -25,6 +25,7 @@ WEEKLY_GOAL = 7   # Цель на неделю
 MONTHLY_STATS_GOAL = 30  # Цель на месяц для статистики
 CACHE_FILE = "todoist_cache.json"
 OLD_TASK_DAYS = 30  # Количество дней для определения "заждавшихся" задач
+EVENTS_FILE = "scheduled_events.json"  # Файл для хранения событий
 # ===================================
 
 
@@ -250,6 +251,38 @@ class TodoistAPI:
                 break
         
         return all_items
+    def create_task(self, content, project_id=None, due_date=None, section_id=None):
+        """Создать новую задачу"""
+        task_data = {
+            "content": content
+        }
+        
+        if project_id:
+            task_data["project_id"] = project_id
+        
+        if due_date:
+            task_data["due_string"] = due_date
+        
+        if section_id:
+            task_data["section_id"] = section_id
+        
+        try:
+            response = requests.post(
+                f"{self.base_url}/tasks",
+                headers=self.headers,
+                json=task_data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ Задача создана: {content}")
+                return response.json()
+            else:
+                print(f"❌ Ошибка создания задачи: {response.status_code}, {response.text}")
+                return None
+        except Exception as e:
+            print(f"❌ Ошибка при создании задачи: {e}")
+            return None
 
 
 class MplCanvas(FigureCanvas):
@@ -1518,6 +1551,7 @@ class PlanningPage(QtWidgets.QWidget):
             print(traceback.format_exc())
 
 
+# Обновите MainWindow:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, font_family=DEFAULT_FONT_FAMILY):
         super().__init__()
@@ -1552,12 +1586,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_project = SidebarButton('📊', 'Аналитика проекта')
         self.btn_weekly = SidebarButton('📅', 'Календарь активности')
         self.btn_planning = SidebarButton('📋', 'Планирование задач')
+        self.btn_creation = SidebarButton('⚡', 'Создание задач')
         
         self.btn_project.setChecked(True)
         
         sidebar_layout.addWidget(self.btn_project)
         sidebar_layout.addWidget(self.btn_weekly)
         sidebar_layout.addWidget(self.btn_planning)
+        sidebar_layout.addWidget(self.btn_creation)
         sidebar_layout.addStretch()
         
         # Кнопка обновления внизу
@@ -1597,10 +1633,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_page = ProjectPage(self.api, self.project_id, self.font_family)
         self.weekly_page = WeeklyPage(self.api, self.font_family)
         self.planning_page = PlanningPage(self.api, self.project_id, self.font_family)
-        
+        self.creation_page = TaskCreationPage(self.api, self.project_id, self.font_family)  # Передаем api и project_id
+
         self.stacked_widget.addWidget(self.project_page)
         self.stacked_widget.addWidget(self.weekly_page)
         self.stacked_widget.addWidget(self.planning_page)
+        self.stacked_widget.addWidget(self.creation_page)
         
         pages_layout.addWidget(self.stacked_widget)
         
@@ -1608,6 +1646,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_project.clicked.connect(lambda: self.switch_page(0))
         self.btn_weekly.clicked.connect(lambda: self.switch_page(1))
         self.btn_planning.clicked.connect(lambda: self.switch_page(2))
+        self.btn_creation.clicked.connect(lambda: self.switch_page(3))
         
         # Добавляем в главный layout
         main_layout.addWidget(sidebar)
@@ -1674,7 +1713,668 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_project.setChecked(index == 0)
         self.btn_weekly.setChecked(index == 1)
         self.btn_planning.setChecked(index == 2)
+        self.btn_creation.setChecked(index == 3)
 
+# Класс для управления событиями
+class EventsManager:
+    """Класс для работы с сохраненными событиями"""
+    
+    @staticmethod
+    def load():
+        """Загрузить события из файла"""
+        try:
+            if os.path.exists(EVENTS_FILE):
+                with open(EVENTS_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"❌ Ошибка загрузки событий: {e}")
+        
+        return {
+            'scheduled': [],
+            'recurring': [],
+            'created_dates': {}  # Для отслеживания созданных задач
+        }
+    
+    @staticmethod
+    def save(events):
+        """Сохранить события в файл"""
+        try:
+            with open(EVENTS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(events, f, ensure_ascii=False, indent=2)
+            print(f"💾 События сохранены")
+        except Exception as e:
+            print(f"❌ Ошибка сохранения событий: {e}")
+
+
+class TaskCreatorThread(QtCore.QThread):
+    """Поток для создания задач в Todoist"""
+    tasks_created = QtCore.pyqtSignal(int)  # Количество созданных задач
+    
+    def __init__(self, api, project_id):
+        super().__init__()
+        self.api = api
+        self.project_id = project_id
+    
+    def run(self):
+        """Проверить и создать задачи"""
+        try:
+            events = EventsManager.load()
+            today = datetime.now()
+            today_str = today.strftime('%Y-%m-%d')
+            created_count = 0
+            
+            # Инициализация created_dates если нет
+            if 'created_dates' not in events:
+                events['created_dates'] = {}
+            
+            # Обработка запланированных задач
+            scheduled_events = events.get('scheduled', [])
+            remaining_scheduled = []
+            
+            for event in scheduled_events:
+                event_date = datetime.strptime(event['date'], '%d.%m.%Y')
+                event_date_str = event_date.strftime('%Y-%m-%d')
+                
+                # Если дата наступила
+                if event_date.date() <= today.date():
+                    # Проверяем, не создавали ли мы уже эту задачу
+                    task_key = f"scheduled_{event['name']}_{event['date']}"
+                    
+                    if task_key not in events['created_dates']:
+                        # Создаем задачу
+                        due_str = event_date.strftime('%d %b %Y')
+                        result = self.api.create_task(
+                            content=event['name'],
+                            project_id=self.project_id,
+                            due_date=due_str
+                        )
+                        
+                        if result:
+                            events['created_dates'][task_key] = today_str
+                            created_count += 1
+                            print(f"✅ Создана запланированная задача: {event['name']} на {event['date']}")
+                    
+                    # Если дата прошла, удаляем событие
+                    if event_date.date() < today.date():
+                        print(f"🗑️ Удалено прошедшее событие: {event['name']}")
+                    else:
+                        remaining_scheduled.append(event)
+                else:
+                    remaining_scheduled.append(event)
+            
+            events['scheduled'] = remaining_scheduled
+            
+            # Обработка повторяющихся задач
+            weekday_map = {
+                'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+                'friday': 4, 'saturday': 5, 'sunday': 6
+            }
+            
+            current_weekday = today.weekday()
+            
+            for event in events.get('recurring', []):
+                # Проверяем, совпадает ли текущий день недели
+                for day_key in event['days']:
+                    if weekday_map.get(day_key) == current_weekday:
+                        # Проверяем, не создавали ли мы уже задачу сегодня
+                        task_key = f"recurring_{event['name']}_{today_str}"
+                        
+                        if task_key not in events['created_dates']:
+                            # Заменяем {date} на текущую дату
+                            task_name = event['name'].replace('{date}', today.strftime('%d.%m.%Y'))
+                            
+                            # Создаем задачу на сегодня
+                            result = self.api.create_task(
+                                content=task_name,
+                                project_id=self.project_id,
+                                due_date='today'
+                            )
+                            
+                            if result:
+                                events['created_dates'][task_key] = today_str
+                                created_count += 1
+                                print(f"✅ Создана повторяющаяся задача: {task_name}")
+                        
+                        break  # Один раз в день создаем задачу
+            
+            # Очистка старых записей created_dates (старше 7 дней)
+            week_ago = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+            events['created_dates'] = {
+                k: v for k, v in events['created_dates'].items()
+                if v >= week_ago
+            }
+            
+            # Сохраняем обновленные события
+            EventsManager.save(events)
+            
+            self.tasks_created.emit(created_count)
+            
+        except Exception as e:
+            print(f"❌ Ошибка создания задач: {e}")
+            import traceback
+            print(traceback.format_exc())
+
+# Диалог добавления запланированного события
+class AddScheduledEventDialog(QtWidgets.QDialog):
+    """Диалог для добавления запланированных событий"""
+    def __init__(self, parent=None, font_family=DEFAULT_FONT_FAMILY):
+        super().__init__(parent)
+        self.font_family = font_family
+        self.setWindowTitle('Добавить запланированные события')
+        self.setMinimumSize(500, 400)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Инструкция
+        instruction = QtWidgets.QLabel('Введите события в формате: название - дд.мм.гггг\nКаждое событие на новой строке')
+        instruction.setFont(QtGui.QFont(self.font_family, 10))
+        instruction.setStyleSheet("color: #6c757d; padding: 10px;")
+        layout.addWidget(instruction)
+        
+        # Текстовое поле
+        self.text_edit = QtWidgets.QPlainTextEdit()
+        self.text_edit.setFont(QtGui.QFont(self.font_family, 10))
+        self.text_edit.setPlaceholderText("Математика - 12.03.2025\nАнглийский - 15.03.2025")
+        layout.addWidget(self.text_edit)
+        
+        # Кнопки
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QtWidgets.QPushButton('Отмена')
+        cancel_btn.setFont(QtGui.QFont(self.font_family, 10))
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        add_btn = QtWidgets.QPushButton('Добавить')
+        add_btn.setFont(QtGui.QFont(self.font_family, 10))
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4A90E2;
+                color: white;
+                padding: 8px 20px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #357ABD;
+            }
+        """)
+        add_btn.clicked.connect(self.accept)
+        button_layout.addWidget(add_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def get_events(self):
+        """Получить список событий из текстового поля"""
+        text = self.text_edit.toPlainText()
+        events = []
+        
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Парсим формат "название - дд.мм.гггг"
+            if ' - ' in line:
+                parts = line.split(' - ')
+                if len(parts) == 2:
+                    name = parts[0].strip()
+                    date_str = parts[1].strip()
+                    
+                    # Проверяем формат даты
+                    try:
+                        date_obj = datetime.strptime(date_str, '%d.%m.%Y')
+                        events.append({
+                            'name': name,
+                            'date': date_str,
+                            'timestamp': date_obj.isoformat()
+                        })
+                    except ValueError:
+                        print(f"⚠️ Неверный формат даты: {date_str}")
+        
+        return events
+
+
+# Диалог добавления повторяющегося события
+class AddRecurringEventDialog(QtWidgets.QDialog):
+    """Диалог для добавления повторяющихся событий"""
+    def __init__(self, parent=None, font_family=DEFAULT_FONT_FAMILY):
+        super().__init__(parent)
+        self.font_family = font_family
+        self.setWindowTitle('Добавить повторяющееся событие')
+        self.setMinimumSize(400, 300)
+        self.setup_ui()
+    
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Название
+        name_label = QtWidgets.QLabel('Название (используйте {date} для вставки даты):')
+        name_label.setFont(QtGui.QFont(self.font_family, 10))
+        layout.addWidget(name_label)
+        
+        self.name_input = QtWidgets.QLineEdit()
+        self.name_input.setFont(QtGui.QFont(self.font_family, 10))
+        self.name_input.setPlaceholderText("Задача на {date}")
+        layout.addWidget(self.name_input)
+        
+        # Дни недели
+        days_label = QtWidgets.QLabel('Выберите дни недели:')
+        days_label.setFont(QtGui.QFont(self.font_family, 10))
+        days_label.setStyleSheet("margin-top: 15px;")
+        layout.addWidget(days_label)
+        
+        days_widget = QtWidgets.QWidget()
+        days_layout = QtWidgets.QVBoxLayout(days_widget)
+        days_layout.setSpacing(8)
+        
+        self.day_checkboxes = {}
+        weekdays = [
+            ('monday', 'Понедельник'),
+            ('tuesday', 'Вторник'),
+            ('wednesday', 'Среда'),
+            ('thursday', 'Четверг'),
+            ('friday', 'Пятница'),
+            ('saturday', 'Суббота'),
+            ('sunday', 'Воскресенье')
+        ]
+        
+        for key, label in weekdays:
+            checkbox = QtWidgets.QCheckBox(label)
+            checkbox.setFont(QtGui.QFont(self.font_family, 10))
+            self.day_checkboxes[key] = checkbox
+            days_layout.addWidget(checkbox)
+        
+        layout.addWidget(days_widget)
+        
+        layout.addStretch()
+        
+        # Кнопки
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addStretch()
+        
+        cancel_btn = QtWidgets.QPushButton('Отмена')
+        cancel_btn.setFont(QtGui.QFont(self.font_family, 10))
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        add_btn = QtWidgets.QPushButton('Добавить')
+        add_btn.setFont(QtGui.QFont(self.font_family, 10))
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4A90E2;
+                color: white;
+                padding: 8px 20px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #357ABD;
+            }
+        """)
+        add_btn.clicked.connect(self.accept)
+        button_layout.addWidget(add_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def get_event(self):
+        """Получить данные события"""
+        name = self.name_input.text().strip()
+        if not name:
+            return None
+        
+        selected_days = []
+        for key, checkbox in self.day_checkboxes.items():
+            if checkbox.isChecked():
+                selected_days.append(key)
+        
+        if not selected_days:
+            return None
+        
+        return {
+            'name': name,
+            'days': selected_days
+        }
+
+
+# Виджет панели событий
+class EventsPanelWidget(QtWidgets.QFrame):
+    """Виджет панели со списком событий"""
+    def __init__(self, title, event_type, font_family=DEFAULT_FONT_FAMILY):
+        super().__init__()
+        self.font_family = font_family
+        self.title = title
+        self.event_type = event_type  # 'scheduled' или 'recurring'
+        self.events = []
+        self.selected_index = None
+        self.setup_ui()
+    
+    def setup_ui(self):
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #f8f9fa;
+                border-radius: 10px;
+                padding: 15px;
+            }
+        """)
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Заголовок и кнопки
+        header_layout = QtWidgets.QHBoxLayout()
+        
+        title_label = QtWidgets.QLabel(self.title)
+        title_label.setFont(QtGui.QFont(self.font_family, 14, QtGui.QFont.Weight.Bold))
+        title_label.setStyleSheet("color: #2c3e50;")
+        header_layout.addWidget(title_label)
+        
+        header_layout.addStretch()
+        
+        # Кнопка удалить
+        self.delete_btn = QtWidgets.QPushButton('🗑️')
+        self.delete_btn.setFixedSize(35, 35)
+        self.delete_btn.setFont(QtGui.QFont(self.font_family, 14))
+        self.delete_btn.setToolTip('Удалить выбранное')
+        self.delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF6B6B;
+                color: white;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #FF4545;
+            }
+            QPushButton:disabled {
+                background-color: #dee2e6;
+            }
+        """)
+        self.delete_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.delete_btn.clicked.connect(self.delete_selected)
+        self.delete_btn.setEnabled(False)
+        header_layout.addWidget(self.delete_btn)
+        
+        # Кнопка добавить
+        add_btn = QtWidgets.QPushButton('➕')
+        add_btn.setFixedSize(35, 35)
+        add_btn.setFont(QtGui.QFont(self.font_family, 14))
+        add_btn.setToolTip('Добавить новое')
+        add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4A90E2;
+                color: white;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #357ABD;
+            }
+        """)
+        add_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        add_btn.clicked.connect(self.add_event)
+        header_layout.addWidget(add_btn)
+        
+        layout.addLayout(header_layout)
+        
+        # Список событий
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #f8f9fa;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #e9ecef;
+                width: 8px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #6c757d;
+                border-radius: 4px;
+            }
+        """)
+        
+        self.events_container = QtWidgets.QWidget()
+        self.events_container.setStyleSheet("background-color: #f8f9fa;")
+        self.events_layout = QtWidgets.QVBoxLayout(self.events_container)
+        self.events_layout.setContentsMargins(0, 0, 0, 0)
+        self.events_layout.setSpacing(5)
+        self.events_layout.addStretch()
+        
+        scroll.setWidget(self.events_container)
+        layout.addWidget(scroll, stretch=1)
+    
+    def add_event(self):
+        """Открыть диалог добавления события"""
+        if self.event_type == 'scheduled':
+            dialog = AddScheduledEventDialog(self, self.font_family)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                new_events = dialog.get_events()
+                self.events.extend(new_events)
+                self.update_display()
+                self.save_events()
+        else:  # recurring
+            dialog = AddRecurringEventDialog(self, self.font_family)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                new_event = dialog.get_event()
+                if new_event:
+                    self.events.append(new_event)
+                    self.update_display()
+                    self.save_events()
+    
+    def delete_selected(self):
+        """Удалить выбранное событие"""
+        if self.selected_index is not None and 0 <= self.selected_index < len(self.events):
+            del self.events[self.selected_index]
+            self.selected_index = None
+            self.delete_btn.setEnabled(False)
+            self.update_display()
+            self.save_events()
+    
+    def select_event(self, index):
+        """Выбрать событие"""
+        self.selected_index = index
+        self.delete_btn.setEnabled(True)
+        self.update_display()
+    
+    def update_display(self):
+        """Обновить отображение списка"""
+        # Очищаем старые виджеты
+        while self.events_layout.count() > 1:
+            child = self.events_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        if not self.events:
+            empty_label = QtWidgets.QLabel("Нет событий")
+            empty_label.setFont(QtGui.QFont(self.font_family, 10))
+            empty_label.setStyleSheet("color: #6c757d; padding: 20px;")
+            empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.events_layout.insertWidget(0, empty_label)
+        else:
+            for i, event in enumerate(self.events):
+                event_widget = QtWidgets.QPushButton()
+                event_widget.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+                
+                if self.event_type == 'scheduled':
+                    text = f"{event['name']}\n📅 {event['date']}"
+                else:  # recurring
+                    days_ru = {
+                        'monday': 'Пн', 'tuesday': 'Вт', 'wednesday': 'Ср',
+                        'thursday': 'Чт', 'friday': 'Пт', 'saturday': 'Сб', 'sunday': 'Вс'
+                    }
+                    days_str = ', '.join([days_ru.get(d, d) for d in event['days']])
+                    text = f"{event['name']}\n🔄 {days_str}"
+                
+                event_widget.setText(text)
+                event_widget.setFont(QtGui.QFont(self.font_family, 10))
+                
+                is_selected = i == self.selected_index
+                event_widget.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {'#4A90E2' if is_selected else '#ffffff'};
+                        color: {'#ffffff' if is_selected else '#2c3e50'};
+                        border: 1px solid {'#4A90E2' if is_selected else '#dee2e6'};
+                        border-radius: 8px;
+                        padding: 12px;
+                        text-align: left;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {'#357ABD' if is_selected else '#e9ecef'};
+                        border: 1px solid #4A90E2;
+                    }}
+                """)
+                
+                event_widget.clicked.connect(lambda checked, idx=i: self.select_event(idx))
+                self.events_layout.insertWidget(i, event_widget)
+    
+    def load_events(self, events):
+        """Загрузить события"""
+        self.events = events
+        self.selected_index = None
+        self.delete_btn.setEnabled(False)
+        self.update_display()
+    
+    def save_events(self):
+        """Сигнал для сохранения событий в родительском виджете"""
+        if self.parent():
+            self.parent().save_all_events()
+
+
+# Страница создания задач
+class TaskCreationPage(QtWidgets.QWidget):
+    """Страница для создания запланированных и повторяющихся задач"""
+    def __init__(self, api, project_id, font_family):
+        super().__init__()
+        self.api = api
+        self.project_id = project_id
+        self.font_family = font_family
+        self.creator_thread = None
+        self.setup_ui()
+        self.load_events()
+        
+        # Таймер для автоматического создания задач
+        self.creation_timer = QtCore.QTimer(self)
+        self.creation_timer.timeout.connect(self.create_tasks)
+        self.creation_timer.start(60000)  # Проверять каждую минуту
+        
+        # Создаем задачи при запуске
+        QtCore.QTimer.singleShot(2000, self.create_tasks)
+    
+    def setup_ui(self):
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Заголовок
+        header_container = QtWidgets.QWidget()
+        header_container.setFixedHeight(60)
+        header_layout = QtWidgets.QHBoxLayout(header_container)
+        header_layout.setContentsMargins(0, 10, 0, 10)
+        
+        header_layout.addStretch()
+        
+        title_label = QtWidgets.QLabel('⚡ Создание задач')
+        title_label.setFont(QtGui.QFont(self.font_family, 20, QtGui.QFont.Weight.Bold))
+        title_label.setStyleSheet("color: #2c3e50;")
+        header_layout.addWidget(title_label)
+        
+        header_layout.addStretch()
+        
+        # Кнопка создать сейчас
+        self.create_now_btn = QtWidgets.QPushButton('🚀 Создать задачи')
+        self.create_now_btn.setFont(QtGui.QFont(self.font_family, 10))
+        self.create_now_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #50C878;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #45B068;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+            }
+        """)
+        self.create_now_btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.create_now_btn.clicked.connect(self.create_tasks)
+        header_layout.addWidget(self.create_now_btn)
+        
+        # Статус
+        self.status_label = QtWidgets.QLabel('Готово к созданию задач')
+        self.status_label.setFont(QtGui.QFont(self.font_family, 9))
+        self.status_label.setStyleSheet("color: #6c757d; padding: 5px;")
+        header_layout.addWidget(self.status_label)
+        
+        main_layout.addWidget(header_container)
+        
+        # Две панели
+        panels_layout = QtWidgets.QHBoxLayout()
+        panels_layout.setSpacing(20)
+        panels_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Левая панель - повторяющиеся
+        self.recurring_panel = EventsPanelWidget('🔄 Повторяющиеся задачи', 'recurring', self.font_family)
+        panels_layout.addWidget(self.recurring_panel, stretch=1)
+        
+        # Правая панель - запланированные
+        self.scheduled_panel = EventsPanelWidget('📅 Запланированные задачи', 'scheduled', self.font_family)
+        panels_layout.addWidget(self.scheduled_panel, stretch=1)
+        
+        main_layout.addLayout(panels_layout, stretch=1)
+    
+    def load_events(self):
+        """Загрузить события из файла"""
+        events = EventsManager.load()
+        self.recurring_panel.load_events(events.get('recurring', []))
+        self.scheduled_panel.load_events(events.get('scheduled', []))
+    
+    def save_all_events(self):
+        """Сохранить все события в файл"""
+        events_data = EventsManager.load()
+        events_data['recurring'] = self.recurring_panel.events
+        events_data['scheduled'] = self.scheduled_panel.events
+        EventsManager.save(events_data)
+    
+    def create_tasks(self):
+        """Запустить процесс создания задач"""
+        if self.creator_thread and self.creator_thread.isRunning():
+            print("⚠️ Создание задач уже выполняется")
+            return
+        
+        self.create_now_btn.setEnabled(False)
+        self.status_label.setText('⏳ Создание задач...')
+        self.status_label.setStyleSheet("color: #FFB347;")
+        
+        self.creator_thread = TaskCreatorThread(self.api, self.project_id)
+        self.creator_thread.tasks_created.connect(self.on_tasks_created)
+        self.creator_thread.finished.connect(self.on_creation_finished)
+        self.creator_thread.start()
+    
+    def on_tasks_created(self, count):
+        """Обработать результат создания задач"""
+        if count > 0:
+            self.status_label.setText(f'✅ Создано задач: {count}')
+            self.status_label.setStyleSheet("color: #50C878;")
+            # Перезагружаем события (могли удалиться прошедшие)
+            self.load_events()
+        else:
+            self.status_label.setText('✓ Нет задач для создания')
+            self.status_label.setStyleSheet("color: #6c757d;")
+    
+    def on_creation_finished(self):
+        """Завершение создания задач"""
+        self.create_now_btn.setEnabled(True)
+        
+        # Через 5 секунд возвращаем стандартный статус
+        QtCore.QTimer.singleShot(5000, lambda: self.status_label.setText('Готово к созданию задач'))
+        QtCore.QTimer.singleShot(5000, lambda: self.status_label.setStyleSheet("color: #6c757d;"))
 
 
 if __name__ == '__main__':
