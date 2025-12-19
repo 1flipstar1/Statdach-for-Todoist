@@ -1761,6 +1761,7 @@ class TaskCreatorThread(QtCore.QThread):
             events = EventsManager.load()
             today = datetime.now()
             today_str = today.strftime('%Y-%m-%d')
+            today_display = today.strftime('%d.%m.%Y')
             created_count = 0
             
             # Инициализация created_dates если нет
@@ -1775,32 +1776,31 @@ class TaskCreatorThread(QtCore.QThread):
                 event_date = datetime.strptime(event['date'], '%d.%m.%Y')
                 event_date_str = event_date.strftime('%Y-%m-%d')
                 
-                # Если дата наступила
-                if event_date.date() <= today.date():
+                # Если сегодня день события
+                if event_date.date() == today.date():
                     # Проверяем, не создавали ли мы уже эту задачу
                     task_key = f"scheduled_{event['name']}_{event['date']}"
                     
                     if task_key not in events['created_dates']:
-                        # Создаем задачу
-                        due_str = event_date.strftime('%d %b %Y')
+                        # Заменяем {date} на дату события
+                        task_name = event['name'].replace('{date}', event['date'])
+                        
+                        # Создаем задачу без due_date (просто задача на сегодня)
                         result = self.api.create_task(
-                            content=event['name'],
-                            project_id=self.project_id,
-                            due_date=due_str
+                            content=task_name,
+                            project_id=self.project_id
                         )
                         
                         if result:
                             events['created_dates'][task_key] = today_str
                             created_count += 1
-                            print(f"✅ Создана запланированная задача: {event['name']} на {event['date']}")
-                    
-                    # Если дата прошла, удаляем событие
-                    if event_date.date() < today.date():
-                        print(f"🗑️ Удалено прошедшее событие: {event['name']}")
-                    else:
-                        remaining_scheduled.append(event)
-                else:
+                            print(f"✅ Создана запланированная задача: {task_name}")
+                
+                # Если дата еще не наступила, оставляем событие
+                if event_date.date() >= today.date():
                     remaining_scheduled.append(event)
+                else:
+                    print(f"🗑️ Удалено прошедшее событие: {event['name']} ({event['date']})")
             
             events['scheduled'] = remaining_scheduled
             
@@ -1821,13 +1821,12 @@ class TaskCreatorThread(QtCore.QThread):
                         
                         if task_key not in events['created_dates']:
                             # Заменяем {date} на текущую дату
-                            task_name = event['name'].replace('{date}', today.strftime('%d.%m.%Y'))
+                            task_name = event['name'].replace('{date}', today_display)
                             
-                            # Создаем задачу на сегодня
+                            # Создаем задачу без due_date
                             result = self.api.create_task(
                                 content=task_name,
-                                project_id=self.project_id,
-                                due_date='today'
+                                project_id=self.project_id
                             )
                             
                             if result:
@@ -1837,11 +1836,11 @@ class TaskCreatorThread(QtCore.QThread):
                         
                         break  # Один раз в день создаем задачу
             
-            # Очистка старых записей created_dates (старше 7 дней)
-            week_ago = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+            # Очистка старых записей created_dates (старше 30 дней)
+            month_ago = (today - timedelta(days=30)).strftime('%Y-%m-%d')
             events['created_dates'] = {
                 k: v for k, v in events['created_dates'].items()
-                if v >= week_ago
+                if v >= month_ago
             }
             
             # Сохраняем обновленные события
@@ -1861,22 +1860,30 @@ class AddScheduledEventDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.font_family = font_family
         self.setWindowTitle('Добавить запланированные события')
-        self.setMinimumSize(500, 400)
+        self.setMinimumSize(500, 450)
         self.setup_ui()
     
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
         
         # Инструкция
-        instruction = QtWidgets.QLabel('Введите события в формате: название - дд.мм.гггг\nКаждое событие на новой строке')
+        instruction = QtWidgets.QLabel(
+            'Введите события в формате: название - дд.мм.гггг\n'
+            'Каждое событие на новой строке\n'
+            'Используйте {date} для вставки даты в название'
+        )
         instruction.setFont(QtGui.QFont(self.font_family, 10))
-        instruction.setStyleSheet("color: #6c757d; padding: 10px;")
+        instruction.setStyleSheet("color: #6c757d; padding: 10px; background-color: #f8f9fa; border-radius: 5px;")
         layout.addWidget(instruction)
         
         # Текстовое поле
         self.text_edit = QtWidgets.QPlainTextEdit()
         self.text_edit.setFont(QtGui.QFont(self.font_family, 10))
-        self.text_edit.setPlaceholderText("Математика - 12.03.2025\nАнглийский - 15.03.2025")
+        self.text_edit.setPlaceholderText(
+            "Математика - 12.03.2025\n"
+            "Английский - 15.03.2025\n"
+            "Встреча {date} - 20.03.2025"
+        )
         layout.addWidget(self.text_edit)
         
         # Кнопки
@@ -2155,6 +2162,8 @@ class EventsPanelWidget(QtWidgets.QFrame):
             if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
                 new_events = dialog.get_events()
                 self.events.extend(new_events)
+                # Сортируем по дате
+                self.events.sort(key=lambda x: datetime.strptime(x['date'], '%d.%m.%Y'))
                 self.update_display()
                 self.save_events()
         else:  # recurring
@@ -2201,14 +2210,21 @@ class EventsPanelWidget(QtWidgets.QFrame):
                 event_widget.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
                 
                 if self.event_type == 'scheduled':
-                    text = f"{event['name']}\n📅 {event['date']}"
+                    # Показываем {date} если есть
+                    name_display = event['name']
+                    if '{date}' in name_display:
+                        name_display += ' (дата будет подставлена)'
+                    text = f"{name_display}\n📅 {event['date']}"
                 else:  # recurring
                     days_ru = {
                         'monday': 'Пн', 'tuesday': 'Вт', 'wednesday': 'Ср',
                         'thursday': 'Чт', 'friday': 'Пт', 'saturday': 'Сб', 'sunday': 'Вс'
                     }
                     days_str = ', '.join([days_ru.get(d, d) for d in event['days']])
-                    text = f"{event['name']}\n🔄 {days_str}"
+                    name_display = event['name']
+                    if '{date}' in name_display:
+                        name_display += ' (дата будет подставлена)'
+                    text = f"{name_display}\n🔄 {days_str}"
                 
                 event_widget.setText(text)
                 event_widget.setFont(QtGui.QFont(self.font_family, 10))
